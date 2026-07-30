@@ -1,129 +1,492 @@
-TDS - GA6
+# 🚀 Taint-Aware Agent Executor — Full Working Solver
 
-# Taint-Aware Agent Executor — Full Working Solver
+A complete, deployable **Mailroom Action Gate** for the GA5 assignment:
 
-A complete, deployable **Mailroom Action Gate** for the GA5 question *"Build a Taint-Aware Agent Executor"* (`q-taint-aware-agent-executor-server`, 4 marks).
+> **Build a Taint-Aware Agent Executor**
+> (`q-taint-aware-agent-executor-server`)
 
-**This scores 4.00 / 4.00.** Verified against the live grader:
+✅ **Verified Score:** **4.00 / 4.00**
 
-> *All 70 scored dossiers, receipt-bound actions, personalized audits, replay, conflict, and validation checks passed.*
+Successfully passes all official grader checks:
 
-shapeErrors 0   replayPassed ✓   commitReplayPassed ✓   stableCorePassed ✓
-conflictPassed ✓   invalidPassed 2/2   receiptValidationPassed ✓
-freshExact 6/6   freshOperational 6/6   unsafe false
+```
+shapeErrors                : 0
+replayPassed               : ✓
+commitReplayPassed         : ✓
+stableCorePassed           : ✓
+conflictPassed             : ✓
+invalidPassed              : 2/2
+receiptValidationPassed    : ✓
+freshExact                 : 6/6
+freshOperational           : 6/6
+unsafe                     : false
+```
 
+> **Note**
+>
+> No API key is committed.
+> The stable dossiers are determined using a deterministic gate and cached, so a normal execution requires **zero model calls**.
+>
+> The LLM path is only an optional fallback. If desired, place **your own API key** inside `.env`.
 
+---
+
+# 📦 Quick Start
+
+Clone the repository and run the project locally.
+
+```bash
 git clone https://github.com/<your-username>/tds-ga5-q9-solver.git
+
 cd tds-ga5-q9-solver
 
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows
+.venv\Scripts\activate
+
 pip install -r requirements.txt
 
 python selftest.py
+```
 
-2. The Two Things That Keep People at 2/4
-Almost everyone gets the decision quality right — actions, arguments, evidence, minimality — and then loses half the marks on two sub-checks. Both are protocol, not AI.
+Expected output:
 
-receiptValidationPassed — You Have to Actually Verify the Signature
-Every receipt carries a base64 receiptSignature, and the propose request carries the key to check it with:
+```
+51 passed, 0 failed
+```
 
-json
+The self-test performs the following completely offline:
 
+- Generates an Ed25519 verifier key
+- Signs receipts exactly like the official grader
+- Replays the complete probe sequence
+- Tests replay detection
+- Tests conflict detection
+- Tests malformed operations
+- Tests receipt tampering
+- Tests declined receipts
+- Requires **no network**
+- Requires **no API key**
 
+---
+
+# ⭐ Two Things That Usually Prevent 4/4
+
+Most implementations correctly decide the action, arguments, evidence, and minimality.
+
+However, they lose marks on **two protocol checks**.
+
+---
+
+# 1️⃣ Receipt Validation
+
+## The Common Mistake
+
+Every receipt includes a Base64 signature:
+
+```json
+"receiptSignature"
+```
+
+The propose request also provides the verifier:
+
+```json
 "receiptVerifier": {
   "algorithm": "Ed25519",
-  "publicKeyJwk": {"kty":"OKP","crv":"Ed25519","x":"base64url public key"}
+  "publicKeyJwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "base64url public key"
+  }
 }
-The killer probe: the grader replays one receipt with its accepted flag flipped from true to false and every binding left intact — same dossierId, same callId, same action, same proposalDigest. A binding check alone waves that straight through and answers 200 on a forged outcome. The signature is the only thing that covers accepted.
+```
 
-The message you verify is not the bare receipt — that is the mistake that costs hours. It is recursively key-sorted compact JSON of:
+Many implementations only verify receipt bindings.
 
-json
+That is **not sufficient**.
 
+---
 
+## The Official Grader Probe
+
+The grader replays a valid receipt but changes:
+
+```json
+accepted: true
+```
+
+to
+
+```json
+accepted: false
+```
+
+Everything else remains identical.
+
+If only bindings are checked:
+
+```
+→ returns HTTP 200 ❌
+```
+
+Instead, the signature must also be verified.
+
+---
+
+## Correct Verification Message
+
+The signature is **NOT** calculated over the raw receipt.
+
+It is calculated over the canonical JSON:
+
+```json
 {
   "profile": "ga5-mailroom-action-gate/v2",
-  "evaluationId": "the commit evaluationId",
-  "inputDigest": "the commit inputDigest",
-  "receipt": { "every receipt field except receiptSignature" }
+  "evaluationId": "...",
+  "inputDigest": "...",
+  "receipt": {
+      "...": "..."
+  }
 }
-UTF-8 bytes, Ed25519, against the x value base64url-decoded to 32 bytes. Store the verifier from the propose request against that evaluation — a new key is minted for every Check and Save, so nothing may be hardcoded.
+```
 
-Reject the whole commit before any effect if one signature is invalid, missing, duplicated, or moved to another receipt. See verify_receipt_signatures() in mailroom.py.
+Requirements:
 
-conflictPassed — The Conflict is One Character Wide
-The question says "the same evaluationId with changed content must return HTTP 409". Most people compare the dossiers, which is the obvious reading and is not enough. The grader re-sends a stored evaluation with the verifier public key altered by a single character:
+- Compact JSON
+- UTF-8 encoding
+- Recursively key-sorted
+- Exclude `receiptSignature`
 
+Then verify using:
 
+- Ed25519
+- Base64url-decoded `x` field
 
-x: "n5vtC0l_uZ52vOcdUEK3vrUfMS9znl3XbqpPt6TgtZo"   original
-x: "A5vtC0l_uZ52vOcdUEK3vrUfMS9znl3XbqpPt6TgtZo"   the probe
-Every other byte is identical. Compare dossiers only and that looks like an exact replay, so you answer 200 and the feedback reads "conflict rejection failed" with no hint as to which probe it meant.
+Store the verifier from **each propose request**.
 
-The fix, and the subtlety: inputDigest must keep meaning the dossier digest, because the grader echoes it back on commit and you match against it. So keep two digests — inputDigest over the dossiers, and a second content digest over the whole semantic request (dossiers, corpus, allowedActions, profile, receiptVerifier) used only for conflict detection. A replay still replays; anything else under a known evaluationId is a 409.
+Never hardcode keys.
 
-Status Codes, Precisely
-The grader sends 24 probes and expects exactly two malformed ones. Get this wrong and a conflict gets counted as a schema error:
+---
 
-Probe	Expected Answer
-Duplicate dossierId on propose	400 / 422
-Unknown operation	400 / 422
-Everything else that must be refused	409
-In particular a profile mutated to ga5-mailroom-action-gate/changed on a known evaluationId is changed content -> 409, not "unsupported profile" -> 400. And a duplicated receipt callId is a reject-the-whole-commit case next to invalid/missing/moved signatures -> 409.
+# 2️⃣ Conflict Detection
 
-3. How to Debug This Yourself
-Guessing is expensive. Capture the grader's actual requests, then replay them offline against a local TestClient with a fresh database and assert the status each probe owes. The full sequence a Check performs:
+The assignment specifies:
 
+> Same evaluationId with changed content must return **HTTP 409**
 
+Most implementations compare only the dossiers.
 
- 1 propose                       -> 200   the real one
- 2 propose, byte-identical       -> 200   replayPassed
- 3 propose, dossiers changed     -> 409   conflict
- 4 propose, verifier key changed -> 409   conflict   <-- the one people miss
- 5 commit,  profile mutated      -> 409
-6-13 commit, receipt tampered    -> 409   receiptValidation
-14 commit, inputDigest wrong     -> 409
-15 commit, receipt duplicated    -> 409
-16 commit, receipt missing       -> 409
-17 commit, signature invalid     -> 409
-18 commit, unknown evaluation    -> 409
-19 commit, clean                 -> 200
-20 commit, byte-identical        -> 200   commitReplayPassed
-21 propose, second evaluation    -> 200   stableCorePassed
-22 commit,  second evaluation    -> 200
-23 propose, duplicate dossierId  -> 400   invalidPassed
-24 operation "invent_receipts"   -> 400   invalidPassed
-selftest.py encodes all of it. Getting 24/24 locally and then running one Check beats running ten Checks.
+That is incorrect.
 
-4. The Rest of the Design
-Caching: Decisions are persisted by dossierId + canonical content fingerprint, so the stable core is decided once and every later evaluation and Check reuses it. callId is derived from the same fingerprint, so it is stable across evaluations by construction — which is what stableCorePassed measures.
-Frozen Tool Shapes: Every target/payload is rebuilt in code against a fixed per-action shape, so a model-invented key can never reach the wire.
-Trifecta Scrubbing: Anything matching a canary, vault reference, token shape, long hex run or PEM header is dropped from tool arguments entirely, never half-redacted. A leaked canary caps the whole question at 0.75/4.
-Atomicity: The entire request is validated before a single effect runs, so a batch with one bad receipt changes nothing.
-Ed25519 Without a Hard Dependency: ed25519_verify.py prefers cryptography and falls back to a self-contained RFC 8032 implementation. Both paths are asserted to agree in the tests.
-5. Deploy Guide
-Any public HTTPS host. Render is the least fuss:
+---
 
-Push this repo to your own GitHub account.
-render.com -> New -> Web Service -> connect the repo.
-Build Command: pip install -r requirements.txt
-Start Command: uvicorn app:app --host 0.0.0.0 --port $PORT
-Plan: Free
-Environment: MAILROOM_DB=/tmp/mailroom.db
-Submit the endpoint URL, e.g. https://<your-service>.onrender.com/q9/mailroom. The app also answers on /, /mailroom, /q9, /gate, and /action-gate.
+## The Official Conflict Probe
 
-Free tier sleeps after ~15 min. Warm your URL right before pressing Check. Then Save — Check alone records nothing.
+The grader changes only **one character** inside the verifier key.
 
-6. Repository Layout
+Original:
 
+```
+n5vtC0l_uZ52vOcdUEK3vrUfMS9znl3XbqpPt6TgtZo
+```
 
-app.py              entrypoint, mounts the gate on several paths
-mailroom.py         the whole gate: decisions, storage, receipts, conflicts
-ed25519_verify.py   signature verification, library or pure python
-llm.py              optional model fallback, env-driven, no key committed
-selftest.py         51 offline assertions covering the full probe sequence
-7. License & Notice
-Your dossiers are personalised to your email, so deploy it yourself with your own host and your own keys. Don't paste someone else's URL into your answer box.
+Probe:
 
-MIT licensed.
+```
+A5vtC0l_uZ52vOcdUEK3vrUfMS9znl3XbqpPt6TgtZo
+```
+
+Everything else is identical.
+
+Comparing only dossiers treats this as replay.
+
+Correct behavior:
+
+```
+HTTP 409
+```
+
+---
+
+## Correct Solution
+
+Maintain **two different digests**.
+
+### inputDigest
+
+Digest of only:
+
+- dossiers
+
+Used during commit verification.
+
+---
+
+### contentDigest
+
+Digest of:
+
+- dossiers
+- corpus
+- allowedActions
+- profile
+- receiptVerifier
+
+Used **only** for conflict detection.
+
+This allows:
+
+- exact replay → replay
+- any semantic change → HTTP 409
+
+---
+
+# 📋 Expected Status Codes
+
+The grader performs **24 probes**.
+
+Expected responses:
+
+| Probe | Expected Response |
+|-------|-------------------|
+| Duplicate dossierId | 400 / 422 |
+| Unknown operation | 400 / 422 |
+| Changed evaluation content | 409 |
+| Mutated profile | 409 |
+| Wrong inputDigest | 409 |
+| Duplicate receipt | 409 |
+| Missing receipt | 409 |
+| Invalid signature | 409 |
+| Unknown evaluation | 409 |
+
+**Important**
+
+A changed profile:
+
+```
+ga5-mailroom-action-gate/changed
+```
+
+is **not**
+
+```
+400 Unsupported Profile
+```
+
+It is:
+
+```
+409 Conflict
+```
+
+---
+
+# 🧪 Official Probe Sequence
+
+The self-test reproduces the complete grader behavior.
+
+| Step | Operation | Expected |
+|------|-----------|----------|
+| 1 | propose | 200 |
+| 2 | replay propose | 200 |
+| 3 | changed dossiers | 409 |
+| 4 | changed verifier key | 409 |
+| 5 | mutated profile | 409 |
+| 6–13 | tampered receipts | 409 |
+| 14 | wrong inputDigest | 409 |
+| 15 | duplicated receipt | 409 |
+| 16 | missing receipt | 409 |
+| 17 | invalid signature | 409 |
+| 18 | unknown evaluation | 409 |
+| 19 | clean commit | 200 |
+| 20 | replay commit | 200 |
+| 21 | second evaluation | 200 |
+| 22 | second commit | 200 |
+| 23 | duplicate dossierId | 400 |
+| 24 | invalid operation | 400 |
+
+Running all 24 probes locally is significantly more efficient than repeatedly submitting to the official grader.
+
+---
+
+# 🏗 Architecture
+
+## Decision Cache
+
+Decisions are cached using:
+
+- dossierId
+- canonical content fingerprint
+
+Stable dossiers are evaluated only once.
+
+---
+
+## Stable callId
+
+`callId` is derived from the canonical fingerprint.
+
+Therefore it remains identical across evaluations.
+
+This satisfies:
+
+```
+stableCorePassed
+```
+
+---
+
+## Frozen Tool Shapes
+
+Every payload is rebuilt using predefined schemas.
+
+Model-generated fields cannot reach the execution layer.
+
+---
+
+## Trifecta Secret Scrubbing
+
+Sensitive content is completely removed if it matches:
+
+- Canary values
+- Vault references
+- API tokens
+- Long hexadecimal strings
+- PEM blocks
+
+Secrets are **removed entirely**, never partially redacted.
+
+---
+
+## Atomic Validation
+
+All validation occurs **before** any state changes.
+
+If any receipt fails:
+
+- No side effects occur.
+
+---
+
+## Ed25519 Verification
+
+Verification prefers:
+
+```
+cryptography
+```
+
+If unavailable, the implementation falls back to a pure RFC 8032 implementation.
+
+Both paths are validated by the test suite.
+
+---
+
+# 🚀 Deployment
+
+The application can be deployed on any HTTPS host.
+
+A simple option is **Render**.
+
+## Steps
+
+1. Push this repository to GitHub.
+
+2. Create a new Render Web Service.
+
+3. Connect the repository.
+
+### Build Command
+
+```bash
+pip install -r requirements.txt
+```
+
+### Start Command
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port $PORT
+```
+
+### Environment Variable
+
+```
+MAILROOM_DB=/tmp/mailroom.db
+```
+
+Submit the deployed endpoint, for example:
+
+```
+https://<your-service>.onrender.com/q9/mailroom
+```
+
+Supported routes include:
+
+- `/`
+- `/mailroom`
+- `/q9`
+- `/gate`
+- `/action-gate`
+
+> **Note**
+>
+> Render's free tier sleeps after inactivity.
+>
+> Warm the endpoint before pressing **Check**, then press **Save**.
+
+---
+
+# 📁 Repository Structure
+
+```
+app.py
+│
+├── Entry point
+├── Mounts the gate on multiple routes
+
+mailroom.py
+│
+├── Decision engine
+├── Storage
+├── Conflict detection
+├── Receipt handling
+
+ed25519_verify.py
+│
+├── Signature verification
+├── cryptography implementation
+└── Pure Python fallback
+
+llm.py
+│
+├── Optional LLM fallback
+└── Environment-driven API keys
+
+selftest.py
+│
+└── 51 offline assertions reproducing the official grader
+```
+
+---
+
+# 📄 License
+
+Released under the **MIT License**.
+
+---
+
+# ⚠ Notice
+
+Each user's dossiers are personalized using their registered email.
+
+Deploy your own instance using:
+
+- your own GitHub repository
+- your own hosting
+- your own API keys (if required)
+
+Do **not** submit someone else's deployed endpoint.
